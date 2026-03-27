@@ -115,10 +115,10 @@ docker compose down
 ghcr.io/<github-owner>/<github-repo>:latest
 ```
 
-例如仓库为 `liubaoyua/LLMApiKeyChecker`，则镜像通常会发布为：
+当前仓库会发布为：
 
 ```text
-ghcr.io/liubaoyua/llmapikeychecker:latest
+ghcr.io/liubaoyua/llm-api-key-checker:latest
 ```
 
 首次使用前，你需要先把本项目推送到 GitHub，并确保 Actions 与 Packages 权限可用。
