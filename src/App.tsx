@@ -11,7 +11,10 @@ import {
   Radar,
   ShieldCheck,
   Sparkles,
+  Server,
+  Search,
 } from 'lucide-react';
+import { BraveChecker } from './BraveChecker';
 
 type ApiFormat = 'openai' | 'claude' | 'unknown' | null;
 
@@ -93,7 +96,8 @@ async function probeModels(
   targetUrl: string,
   headers: Record<string, string>,
 ) {
-  const response = await axios.get('/__proxy', {
+  const proxyUrl = import.meta.env.VITE_PROXY_URL || '/__proxy';
+  const response = await axios.get(proxyUrl, {
     params: { url: targetUrl },
     headers,
     timeout: 15000,
@@ -102,7 +106,7 @@ async function probeModels(
   return response.data;
 }
 
-function App() {
+function LLMChecker() {
   const [baseUrl, setBaseUrl] = useState(DEFAULT_BASE_URL);
   const [apiKey, setApiKey] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -148,12 +152,12 @@ function App() {
         format: 'unknown',
         models: [],
         endpoint: modelsEndpoint,
-        error: 'Base URL and API Key are required.',
+        error: '需要填写基础地址和 API 密钥。',
         statuses: [
           {
-            label: 'Input validation',
+            label: '输入校验',
             state: 'failed',
-            detail: 'Fill in both the base URL and the API key before testing.',
+            detail: '测试前请同时填写基础地址与 API 密钥。',
           },
         ],
       });
@@ -165,19 +169,19 @@ function App() {
 
     const initialStatuses: ProbeStatus[] = [
       {
-        label: 'Route request through local proxy',
+        label: '通过后端代理转发请求',
         state: 'running',
-        detail: 'Avoiding browser-side CORS by sending the request through Vite dev server.',
+        detail: '通过同源后端服务转发请求以解决浏览器侧 CORS 跨域限制。',
       },
       {
-        label: 'Probe OpenAI-compatible models endpoint',
+        label: '探测 OpenAI 兼容的模型端点',
         state: 'idle',
-        detail: 'Checking Authorization bearer flow and `/v1/models` response shape.',
+        detail: '验证 Authorization Bearer 流程与 `/v1/models` 的响应结构。',
       },
       {
-        label: 'Probe Claude-compatible models endpoint',
+        label: '探测 Claude 兼容的模型端点',
         state: 'idle',
-        detail: 'Checking `x-api-key` + `anthropic-version` headers against the same endpoint.',
+        detail: '使用 `x-api-key` + `anthropic-version` 请求头检测同一端点。',
       },
     ];
 
@@ -208,19 +212,19 @@ function App() {
               {
                 ...openAiStatuses[1],
                 state: 'success',
-                detail: `Detected ${openAiModels.length} models from an OpenAI-compatible response.`,
+                detail: `从 OpenAI 兼容响应中检测到 ${openAiModels.length} 个模型。`,
               },
               {
                 ...openAiStatuses[2],
                 state: 'idle',
-                detail: 'Skipped because the OpenAI-compatible probe already succeeded.',
+                detail: '已跳过，因为 OpenAI 兼容探测已成功。',
               },
             ],
           });
           return;
         }
 
-        throw new Error('Received a response, but no model identifiers were found.');
+        throw new Error('已收到响应，但未找到模型标识。');
       } catch (openAiError) {
         const openAiMessage = formatAxiosError(openAiError);
         const claudeStatuses = [
@@ -258,14 +262,14 @@ function App() {
                 {
                   ...claudeStatuses[2],
                   state: 'success',
-                  detail: `Detected ${claudeModels.length} models from a Claude-compatible response.`,
+                  detail: `从 Claude 兼容响应中检测到 ${claudeModels.length} 个模型。`,
                 },
               ],
             });
             return;
           }
 
-          throw new Error('Received a response, but no Claude-compatible model identifiers were found.');
+          throw new Error('已收到响应，但未找到 Claude 兼容的模型标识。');
         } catch (claudeError) {
           const claudeMessage = formatAxiosError(claudeError);
 
@@ -274,8 +278,8 @@ function App() {
             models: [],
             endpoint: modelsEndpoint,
             error:
-              `The endpoint responded, but neither OpenAI nor Claude model discovery matched. ` +
-              `OpenAI probe: ${openAiMessage} Claude probe: ${claudeMessage}`,
+              `端点有响应，但未匹配到 OpenAI 或 Claude 的模型发现。` +
+              `OpenAI 探测：${openAiMessage} Claude 探测：${claudeMessage}`,
             statuses: [
               claudeStatuses[0],
               claudeStatuses[1],
@@ -296,9 +300,9 @@ function App() {
         error: formatAxiosError(unexpectedError),
         statuses: [
           {
-            label: 'Execution failure',
+            label: '执行失败',
             state: 'failed',
-            detail: 'The test flow stopped before model detection completed.',
+            detail: '测试流程在模型检测完成之前已中断。',
           },
         ],
       });
@@ -309,36 +313,32 @@ function App() {
 
   const formatLabel =
     result?.format === 'openai'
-      ? 'OpenAI-compatible'
+      ? '兼容 OpenAI'
       : result?.format === 'claude'
-        ? 'Claude-compatible'
-        : 'Undetermined';
+        ? '兼容 Claude'
+        : '未确定';
 
   return (
-    <main className="app-shell">
-      <div className="page-glow page-glow-left" />
-      <div className="page-glow page-glow-right" />
-
+    <>
       <section className="hero-panel">
         <div className="hero-copy">
           <div className="eyebrow">
             <Sparkles size={16} />
-            API endpoint diagnostics
+            API端点诊断
           </div>
-          <h1>LLM API Key Checker</h1>
+          <h1>LLM API密钥检测器</h1>
           <p className="hero-lead">
-            Validate a base URL, test the key against common model-discovery conventions, and avoid
-            browser-side CORS during local development.
+            验证基础地址，按常见的模型发现约定测试密钥，并通过配套后端代理解决浏览器跨域请求（CORS）问题。
           </p>
 
           <div className="hero-metrics">
             <article className="metric-card">
-              <span>Target endpoint</span>
-              <strong>{modelsEndpoint || 'Waiting for a base URL'}</strong>
+              <span>目标端点</span>
+              <strong>{modelsEndpoint || '等待基础地址'}</strong>
             </article>
             <article className="metric-card">
-              <span>Browser CORS strategy</span>
-              <strong>Local proxy on `/__proxy`</strong>
+              <span>后端代理策略</span>
+              <strong>同源服务：`/__proxy`</strong>
             </article>
           </div>
 
@@ -346,41 +346,41 @@ function App() {
             <article className="guidance-card">
               <ShieldCheck size={18} />
               <div>
-                <h2>Safer key handling</h2>
-                <p>Requests are relayed through the local Vite server instead of exposing a cross-origin browser call.</p>
+                <h2>更安全的跨域处理</h2>
+                <p>通过部署配套的 Node.js 后端服务转发请求，避免了前端直接跨域调用导致的拦截与暴露。</p>
               </div>
             </article>
             <article className="guidance-card">
               <Radar size={18} />
               <div>
-                <h2>Dual format probe</h2>
-                <p>The tester checks both bearer-token and Claude-style headers against `/v1/models`.</p>
+                <h2>双格式探测</h2>
+                <p>测试器会同时以 Bearer 令牌和 Claude 风格请求头探测 `/v1/models`。</p>
               </div>
             </article>
             <article className="guidance-card">
               <Network size={18} />
               <div>
-                <h2>Production note</h2>
-                <p>A deployed static site still needs a real backend relay or upstream CORS support from the API provider.</p>
+                <h2>开箱即用的部署</h2>
+                <p>项目已包含完整的 Docker 配置，前端页面与代理服务可一键部署至生产环境。</p>
               </div>
             </article>
           </div>
         </div>
 
-        <section className="control-panel" aria-label="API checker form">
+        <section className="control-panel" aria-label="API检测表单">
           <div className="panel-header">
             <div>
-              <p className="panel-kicker">Run a probe</p>
-              <h2>Connection setup</h2>
+              <p className="panel-kicker">运行探测</p>
+              <h2>连接设置</h2>
             </div>
             <span className="status-pill">
               <LockKeyhole size={14} />
-              Dev proxy enabled
+              后端代理已启用
             </span>
           </div>
 
           <div className="field-group">
-            <label htmlFor="baseUrl">Base URL</label>
+            <label htmlFor="baseUrl">基础地址</label>
             <div className="input-shell">
               <Globe size={18} />
               <input
@@ -393,42 +393,42 @@ function App() {
                 onChange={(event) => setBaseUrl(event.target.value)}
               />
             </div>
-            <p className="field-note">Use the API root. The app will normalize it to the correct `/v1/models` path.</p>
+            <p className="field-note">请使用 API 根地址，应用会规范化为正确的 `/v1/models` 路径。</p>
           </div>
 
           <div className="field-group">
-            <label htmlFor="apiKey">API Key</label>
+            <label htmlFor="apiKey">API密钥</label>
             <div className="input-shell">
               <KeyRound size={18} />
               <input
                 id="apiKey"
                 name="apiKey"
-                type="password"
+                type="text"
                 autoComplete="off"
                 placeholder="sk-..."
                 value={apiKey}
                 onChange={(event) => setApiKey(event.target.value)}
               />
             </div>
-            <p className="field-note">The key is stored locally in this browser session so you can rerun checks without retyping.</p>
+            <p className="field-note">密钥会在本地会话中保存，便于重复运行无需再次输入。</p>
           </div>
 
           <button className="primary-button" onClick={handleTest} disabled={!canSubmit}>
             {isLoading ? (
               <>
                 <Loader2 size={18} className="spin" />
-                Testing endpoint
+                正在测试端点
               </>
             ) : (
               <>
                 <Sparkles size={18} />
-                Test API key
+                测试API密钥
               </>
             )}
           </button>
 
           <div className="endpoint-preview">
-            <span>Resolved models endpoint</span>
+            <span>解析后的模型端点</span>
             <code>{modelsEndpoint || 'https://example.com/v1/models'}</code>
           </div>
         </section>
@@ -439,17 +439,17 @@ function App() {
           <article className="results-panel">
             <div className="panel-header">
               <div>
-                <p className="panel-kicker">Probe result</p>
+                <p className="panel-kicker">探测结果</p>
                 <h2>{formatLabel}</h2>
               </div>
               <span className={`badge ${result.error ? 'badge-danger' : 'badge-success'}`}>
                 {result.error ? <AlertTriangle size={14} /> : <CheckCircle2 size={14} />}
-                {result.error ? 'Attention needed' : 'Connection verified'}
+                {result.error ? '需要关注' : '连接已验证'}
               </span>
             </div>
 
             <div className="summary-card">
-              <span>Endpoint tested</span>
+              <span>已测试端点</span>
               <strong>{result.endpoint}</strong>
             </div>
 
@@ -461,7 +461,7 @@ function App() {
             ) : (
               <div className="message-box message-box-success">
                 <CheckCircle2 size={18} />
-                <p>The endpoint returned a recognizable model list. Review the discovered models below.</p>
+                <p>端点返回了可识别的模型列表，请在下方查看已发现的模型。</p>
               </div>
             )}
           </article>
@@ -469,8 +469,8 @@ function App() {
           <article className="results-panel">
             <div className="panel-header">
               <div>
-                <p className="panel-kicker">Execution trace</p>
-                <h2>What happened</h2>
+                <p className="panel-kicker">执行轨迹</p>
+                <h2>过程详情</h2>
               </div>
             </div>
 
@@ -500,8 +500,8 @@ function App() {
           <article className="results-panel models-panel">
             <div className="panel-header">
               <div>
-                <p className="panel-kicker">Discovered models</p>
-                <h2>{result.models.length} available</h2>
+                <p className="panel-kicker">已发现模型</p>
+                <h2>{result.models.length} 个可用</h2>
               </div>
             </div>
 
@@ -514,11 +514,65 @@ function App() {
                 ))}
               </div>
             ) : (
-              <p className="empty-state">No model identifiers were extracted from the response payload.</p>
+              <p className="empty-state">未能从响应负载中提取到模型标识。</p>
             )}
           </article>
         </section>
       )}
+    </>
+  );
+}
+
+function App() {
+  const [activeTab, setActiveTab] = useState<'llm' | 'brave'>('llm');
+
+  return (
+    <main className="app-shell">
+      <div className="page-glow page-glow-left" />
+      <div className="page-glow page-glow-right" />
+      
+      <div style={{ display: 'flex', gap: '16px', marginBottom: '24px', padding: '0 16px' }}>
+        <button 
+          onClick={() => setActiveTab('llm')}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            padding: '12px 24px',
+            borderRadius: '12px',
+            border: '1px solid var(--line)',
+            background: activeTab === 'llm' ? 'var(--panel-strong)' : 'var(--panel)',
+            color: activeTab === 'llm' ? 'var(--text)' : 'var(--text-muted)',
+            fontWeight: activeTab === 'llm' ? 600 : 500,
+            cursor: 'pointer',
+            transition: 'all 0.2s ease'
+          }}
+        >
+          <Server size={18} />
+          LLM 接口检测
+        </button>
+        <button 
+          onClick={() => setActiveTab('brave')}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            padding: '12px 24px',
+            borderRadius: '12px',
+            border: '1px solid var(--line)',
+            background: activeTab === 'brave' ? 'var(--panel-strong)' : 'var(--panel)',
+            color: activeTab === 'brave' ? 'var(--text)' : 'var(--text-muted)',
+            fontWeight: activeTab === 'brave' ? 600 : 500,
+            cursor: 'pointer',
+            transition: 'all 0.2s ease'
+          }}
+        >
+          <Search size={18} />
+          Brave Search 检测
+        </button>
+      </div>
+
+      {activeTab === 'llm' ? <LLMChecker /> : <BraveChecker />}
     </main>
   );
 }
