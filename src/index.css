@@ -546,11 +546,43 @@ code {
 }
 
 .history-list,
-.model-check-list {
+.model-check-list,
+.format-section-list {
   display: flex;
   flex-direction: column;
   gap: 12px;
   margin-top: 18px;
+}
+
+.format-section-list-two-column {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+}
+
+.format-section {
+  padding: 18px;
+  border-radius: 20px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.format-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.format-section-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.format-section-head h3 {
+  margin: 6px 0 0;
+  font-size: 1.1rem;
 }
 
 .history-item,
@@ -670,10 +702,21 @@ code {
   }
 
   .history-item-head,
+  .format-section-head,
   .model-check-item,
   .model-check-actions {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .format-section-toolbar {
+    width: 100%;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .format-section-list-two-column {
+    grid-template-columns: 1fr;
   }
 
   .models-batch-button,

@@ -11,6 +11,7 @@ import {
   Radar,
   RefreshCcw,
   Send,
+  SquareArrowOutUpRight,
   Server,
   ShieldCheck,
   Sparkles,
@@ -18,7 +19,7 @@ import {
 } from 'lucide-react';
 import { BraveChecker } from './BraveChecker';
 
-type ApiFormat = 'openai' | 'claude' | 'unknown' | null;
+type ApiFormat = 'openai' | 'claude';
 type StatusState = 'idle' | 'running' | 'success' | 'failed';
 type ModelCheckState = 'idle' | 'testing' | 'success' | 'failed';
 
@@ -29,15 +30,21 @@ type ProbeStatus = {
 };
 
 type ModelCheckResult = {
+  format: ApiFormat;
   model: string;
   state: ModelCheckState;
   detail: string;
   checkedAt?: string;
 };
 
-type TestResult = {
-  format: ApiFormat;
+type FormatResult = {
   models: string[];
+  error?: string;
+};
+
+type TestResult = {
+  supportedFormats: ApiFormat[];
+  formatResults: Record<ApiFormat, FormatResult>;
   error?: string;
   endpoint: string;
   statuses: ProbeStatus[];
@@ -48,15 +55,16 @@ type HistoryEntry = {
   id: string;
   baseUrl: string;
   apiKey: string;
-  format: Exclude<ApiFormat, null>;
+  supportedFormats: ApiFormat[];
+  format?: ApiFormat;
   endpoint: string;
   modelCount: number;
   createdAt: string;
 };
 
 type ProbeOutcome = {
-  format: Exclude<ApiFormat, null>;
-  models: string[];
+  supportedFormats: ApiFormat[];
+  formatResults: Record<ApiFormat, FormatResult>;
   statuses: ProbeStatus[];
   endpoint: string;
 };
@@ -178,6 +186,47 @@ function createInitialStatuses(): ProbeStatus[] {
   ];
 }
 
+function createEmptyFormatResults(): Record<ApiFormat, FormatResult> {
+  return {
+    openai: { models: [] },
+    claude: { models: [] },
+  };
+}
+
+function buildModelCheckKey(format: ApiFormat, model: string) {
+  return `${format}:${model}`;
+}
+
+function getFormatLabel(format: ApiFormat) {
+  return format === 'openai' ? 'OpenAI' : 'Claude';
+}
+
+function getCcSwitchApp(format: ApiFormat) {
+  return format === 'openai' ? 'codex' : 'claude';
+}
+
+function getProviderName(baseUrl: string, format: ApiFormat, model?: string) {
+  try {
+    const host = new URL(baseUrl).host;
+    return model ? `${host} · ${getFormatLabel(format)} · ${model}` : `${host} · ${getFormatLabel(format)}`;
+  } catch {
+    return model ? `${getFormatLabel(format)} · ${model}` : getFormatLabel(format);
+  }
+}
+
+function buildCcSwitchImportUrl(baseUrl: string, apiKey: string, format: ApiFormat) {
+  const params = new URLSearchParams({
+    resource: 'provider',
+    app: getCcSwitchApp(format),
+    name: getProviderName(baseUrl, format),
+    endpoint: normalizeBaseUrl(baseUrl),
+    apiKey: apiKey.trim(),
+    homepage: window.location.href,
+  });
+
+  return `ccswitch://v1/import?${params.toString()}`;
+}
+
 async function detectModels(
   cleanBaseUrl: string,
   apiKey: string,
@@ -186,19 +235,20 @@ async function detectModels(
   const endpoint = buildModelsUrl(cleanBaseUrl);
   const initialStatuses = createInitialStatuses();
   const trimmedKey = apiKey.trim();
-
-  const openAiStatuses = [...initialStatuses];
-  openAiStatuses[0] = { ...openAiStatuses[0], state: 'success' };
-  openAiStatuses[1] = { ...openAiStatuses[1], state: 'running' };
+  const formatResults = createEmptyFormatResults();
+  const statuses = [...initialStatuses];
+  statuses[0] = { ...statuses[0], state: 'success' };
+  statuses[1] = { ...statuses[1], state: 'running' };
 
   onProgress({
-    format: null,
-    models: [],
+    supportedFormats: [],
+    formatResults,
     endpoint,
-    statuses: openAiStatuses,
+    statuses,
     modelChecks: {},
   });
 
+  let openAiMessage = '';
   try {
     const openAiData = await proxyGet(endpoint, {
       Authorization: `Bearer ${trimmedKey}`,
@@ -206,86 +256,87 @@ async function detectModels(
     const openAiModels = parseModelIds(openAiData);
 
     if (openAiModels.length > 0) {
-      return {
-        format: 'openai',
-        models: openAiModels,
-        endpoint,
-        statuses: [
-          { ...openAiStatuses[0], state: 'success' },
-          {
-            ...openAiStatuses[1],
-            state: 'success',
-            detail: `从 OpenAI 兼容响应中检测到 ${openAiModels.length} 个模型。`,
-          },
-          {
-            ...openAiStatuses[2],
-            state: 'idle',
-            detail: '已跳过，因为 OpenAI 兼容探测已成功。',
-          },
-        ],
+      formatResults.openai = { models: openAiModels };
+      statuses[1] = {
+        ...statuses[1],
+        state: 'success',
+        detail: `从 OpenAI 兼容响应中检测到 ${openAiModels.length} 个模型。`,
       };
+    } else {
+      throw new Error('已收到响应，但未找到模型标识。');
     }
-
-    throw new Error('已收到响应，但未找到模型标识。');
   } catch (openAiError) {
-    const openAiMessage = formatAxiosError(openAiError);
-    const claudeStatuses = [
-      { ...openAiStatuses[0], state: 'success' as const },
-      {
-        ...openAiStatuses[1],
-        state: 'failed' as const,
-        detail: openAiMessage,
-      },
-      { ...openAiStatuses[2], state: 'running' as const },
-    ];
-
-    onProgress({
-      format: null,
-      models: [],
-      endpoint,
-      statuses: claudeStatuses,
-      modelChecks: {},
-    });
-
-    try {
-      const claudeData = await proxyGet(endpoint, {
-        'x-api-key': trimmedKey,
-        'anthropic-version': '2023-06-01',
-      });
-      const claudeModels = parseModelIds(claudeData);
-
-      if (claudeModels.length > 0) {
-        return {
-          format: 'claude',
-          models: claudeModels,
-          endpoint,
-          statuses: [
-            claudeStatuses[0],
-            claudeStatuses[1],
-            {
-              ...claudeStatuses[2],
-              state: 'success',
-              detail: `从 Claude 兼容响应中检测到 ${claudeModels.length} 个模型。`,
-            },
-          ],
-        };
-      }
-
-      throw new Error('已收到响应，但未找到 Claude 兼容的模型标识。');
-    } catch (claudeError) {
-      const claudeMessage = formatAxiosError(claudeError);
-
-      throw new Error(
-        `端点有响应，但未匹配到 OpenAI 或 Claude 的模型发现。OpenAI 探测：${openAiMessage} Claude 探测：${claudeMessage}`,
-      );
-    }
+    openAiMessage = formatAxiosError(openAiError);
+    formatResults.openai = { models: [], error: openAiMessage };
+    statuses[1] = {
+      ...statuses[1],
+      state: 'failed',
+      detail: openAiMessage,
+    };
   }
+
+  statuses[2] = { ...statuses[2], state: 'running' };
+  onProgress({
+    supportedFormats: formatResults.openai.models.length > 0 ? ['openai'] : [],
+    formatResults: {
+      openai: { ...formatResults.openai },
+      claude: { ...formatResults.claude },
+    },
+    endpoint,
+    statuses: [...statuses],
+    modelChecks: {},
+  });
+
+  let claudeMessage = '';
+  try {
+    const claudeData = await proxyGet(endpoint, {
+      'x-api-key': trimmedKey,
+      'anthropic-version': '2023-06-01',
+    });
+    const claudeModels = parseModelIds(claudeData);
+
+    if (claudeModels.length > 0) {
+      formatResults.claude = { models: claudeModels };
+      statuses[2] = {
+        ...statuses[2],
+        state: 'success',
+        detail: `从 Claude 兼容响应中检测到 ${claudeModels.length} 个模型。`,
+      };
+    } else {
+      throw new Error('已收到响应，但未找到 Claude 兼容的模型标识。');
+    }
+  } catch (claudeError) {
+    claudeMessage = formatAxiosError(claudeError);
+    formatResults.claude = { models: [], error: claudeMessage };
+    statuses[2] = {
+      ...statuses[2],
+      state: 'failed',
+      detail: claudeMessage,
+    };
+  }
+
+  const supportedFormats = (['openai', 'claude'] as const).filter(
+    (format) => formatResults[format].models.length > 0,
+  );
+
+  if (supportedFormats.length === 0) {
+    throw new Error(
+      `端点有响应，但未匹配到 OpenAI 或 Claude 的模型发现。OpenAI 探测：${openAiMessage} Claude 探测：${claudeMessage}`,
+    );
+  }
+
+  return {
+    supportedFormats,
+    formatResults,
+    endpoint,
+    statuses,
+  };
 }
 
 async function probeModelAvailability(
   cleanBaseUrl: string,
   apiKey: string,
-  format: Exclude<ApiFormat, 'unknown' | null>,
+  format: ApiFormat,
   model: string,
 ) {
   const trimmedKey = apiKey.trim();
@@ -395,7 +446,7 @@ function LLMChecker() {
     !isBatchTestingModels &&
     activeModelTest === null &&
     result !== null &&
-    (result.format === 'openai' || result.format === 'claude');
+    result.supportedFormats.length > 0;
 
   const runTest = async (options?: { baseUrl?: string; apiKey?: string; historyId?: string | null }) => {
     const nextBaseUrl = options?.baseUrl ?? baseUrl;
@@ -405,8 +456,8 @@ function LLMChecker() {
 
     if (!normalizedBaseUrl || !nextApiKey.trim()) {
       setResult({
-        format: 'unknown',
-        models: [],
+        supportedFormats: [],
+        formatResults: createEmptyFormatResults(),
         endpoint,
         error: '需要填写基础地址和 API 密钥。',
         statuses: [
@@ -432,8 +483,8 @@ function LLMChecker() {
     try {
       const outcome = await detectModels(normalizedBaseUrl, nextApiKey, setResult);
       const finalResult: TestResult = {
-        format: outcome.format,
-        models: outcome.models,
+        supportedFormats: outcome.supportedFormats,
+        formatResults: outcome.formatResults,
         endpoint: outcome.endpoint,
         statuses: outcome.statuses,
         modelChecks: {},
@@ -445,16 +496,19 @@ function LLMChecker() {
         id: `${Date.now()}`,
         baseUrl: normalizedBaseUrl,
         apiKey: nextApiKey.trim(),
-        format: outcome.format,
+        supportedFormats: outcome.supportedFormats,
         endpoint: outcome.endpoint,
-        modelCount: outcome.models.length,
+        modelCount: outcome.supportedFormats.reduce(
+          (count, format) => count + outcome.formatResults[format].models.length,
+          0,
+        ),
         createdAt: new Date().toISOString(),
       });
       setHistoryEntries(nextHistory);
     } catch (error) {
       setResult({
-        format: 'unknown',
-        models: [],
+        supportedFormats: [],
+        formatResults: createEmptyFormatResults(),
         endpoint,
         error: formatAxiosError(error),
         statuses: [
@@ -472,12 +526,13 @@ function LLMChecker() {
     }
   };
 
-  const handleModelTest = async (model: string) => {
-    if (!result || result.format !== 'openai' && result.format !== 'claude') {
+  const handleModelTest = async (format: ApiFormat, model: string) => {
+    if (!result || !result.supportedFormats.includes(format)) {
       return;
     }
 
-    setActiveModelTest(model);
+    const modelCheckKey = buildModelCheckKey(format, model);
+    setActiveModelTest(modelCheckKey);
     setResult((current) => {
       if (!current) {
         return current;
@@ -487,7 +542,8 @@ function LLMChecker() {
         ...current,
         modelChecks: {
           ...current.modelChecks,
-          [model]: {
+          [modelCheckKey]: {
+            format,
             model,
             state: 'testing',
             detail: '正在调用真实推理接口验证模型可用性。',
@@ -497,7 +553,7 @@ function LLMChecker() {
     });
 
     try {
-      const detail = await probeModelAvailability(cleanBaseUrl, apiKey, result.format, model);
+      const detail = await probeModelAvailability(cleanBaseUrl, apiKey, format, model);
 
       setResult((current) => {
         if (!current) {
@@ -508,7 +564,8 @@ function LLMChecker() {
           ...current,
           modelChecks: {
             ...current.modelChecks,
-            [model]: {
+            [modelCheckKey]: {
+              format,
               model,
               state: 'success',
               detail,
@@ -527,7 +584,8 @@ function LLMChecker() {
           ...current,
           modelChecks: {
             ...current.modelChecks,
-            [model]: {
+            [modelCheckKey]: {
+              format,
               model,
               state: 'failed',
               detail: formatAxiosError(error),
@@ -541,16 +599,17 @@ function LLMChecker() {
     }
   };
 
-  const handleTestAllModels = async () => {
-    if (!result || (result.format !== 'openai' && result.format !== 'claude') || result.models.length === 0) {
+  const handleTestAllModels = async (format: ApiFormat) => {
+    if (!result || !result.supportedFormats.includes(format) || result.formatResults[format].models.length === 0) {
       return;
     }
 
     setIsBatchTestingModels(true);
 
     try {
-      for (const model of result.models) {
-        setActiveModelTest(model);
+      for (const model of result.formatResults[format].models) {
+        const modelCheckKey = buildModelCheckKey(format, model);
+        setActiveModelTest(modelCheckKey);
         setResult((current) => {
           if (!current) {
             return current;
@@ -560,7 +619,8 @@ function LLMChecker() {
             ...current,
             modelChecks: {
               ...current.modelChecks,
-              [model]: {
+              [modelCheckKey]: {
+                format,
                 model,
                 state: 'testing',
                 detail: '正在调用真实推理接口验证模型可用性。',
@@ -570,7 +630,7 @@ function LLMChecker() {
         });
 
         try {
-          const detail = await probeModelAvailability(cleanBaseUrl, apiKey, result.format, model);
+          const detail = await probeModelAvailability(cleanBaseUrl, apiKey, format, model);
 
           setResult((current) => {
             if (!current) {
@@ -581,7 +641,8 @@ function LLMChecker() {
               ...current,
               modelChecks: {
                 ...current.modelChecks,
-                [model]: {
+                [modelCheckKey]: {
+                  format,
                   model,
                   state: 'success',
                   detail,
@@ -600,7 +661,8 @@ function LLMChecker() {
               ...current,
               modelChecks: {
                 ...current.modelChecks,
-                [model]: {
+                [modelCheckKey]: {
+                  format,
                   model,
                   state: 'failed',
                   detail: formatAxiosError(error),
@@ -617,11 +679,16 @@ function LLMChecker() {
     }
   };
 
+  const handleImportToCcSwitch = (format: ApiFormat) => {
+    const importUrl = buildCcSwitchImportUrl(cleanBaseUrl, apiKey, format);
+    window.location.href = importUrl;
+  };
+
   const formatLabel =
-    result?.format === 'openai'
-      ? '兼容 OpenAI'
-      : result?.format === 'claude'
-        ? '兼容 Claude'
+    result?.supportedFormats.length === 2
+      ? '兼容 OpenAI + Claude'
+      : result?.supportedFormats[0]
+        ? `兼容 ${getFormatLabel(result.supportedFormats[0])}`
         : '未确定';
 
   return (
@@ -767,7 +834,9 @@ function LLMChecker() {
                     </span>
                   </div>
                   <p>
-                    密钥 {maskApiKey(entry.apiKey)} · {entry.format === 'openai' ? 'OpenAI' : 'Claude'} · {entry.modelCount} 个模型
+                    密钥 {maskApiKey(entry.apiKey)} · {(entry.supportedFormats ?? (entry.format ? [entry.format] : []))
+                      .map(getFormatLabel)
+                      .join(' + ') || '未知协议'} · {entry.modelCount} 个模型
                   </p>
                   <code>{entry.endpoint}</code>
                 </button>
@@ -804,7 +873,7 @@ function LLMChecker() {
             ) : (
               <div className="message-box message-box-success">
                 <CheckCircle2 size={18} />
-                <p>端点返回了可识别的模型列表。你现在可以逐个点击模型，验证该模型是否真正可用于推理请求。</p>
+                <p>端点返回了可识别的协议与模型列表。你现在可以按协议分别测试单个模型，或对该协议下一键逐个测试。</p>
               </div>
             )}
           </article>
@@ -844,81 +913,104 @@ function LLMChecker() {
             <div className="panel-header">
               <div>
                 <p className="panel-kicker">模型可用性</p>
-                <h2>{result.models.length} 个已发现模型</h2>
+                <h2>{result.supportedFormats.length} 种已识别协议</h2>
               </div>
-              {result.models.length > 0 && (
-                <button
-                  type="button"
-                  className="secondary-button models-batch-button"
-                  onClick={() => void handleTestAllModels()}
-                  disabled={!canRunModelChecks}
-                >
-                  {isBatchTestingModels ? (
-                    <>
-                      <Loader2 size={16} className="spin" />
-                      正在逐个测试
-                    </>
-                  ) : (
-                    <>
-                      <Send size={16} />
-                      一键测试全部
-                    </>
-                  )}
-                </button>
-              )}
             </div>
 
-            {result.models.length > 0 ? (
-              <div className="model-check-list">
-                {result.models.map((model) => {
-                  const check = result.modelChecks[model];
-                  const isTesting = activeModelTest === model || check?.state === 'testing';
-
-                  return (
-                    <div key={model} className="model-check-item">
-                      <div className="model-check-copy">
-                        <strong>{model}</strong>
-                        <p>
-                          {check?.detail ?? '尚未验证该模型是否能成功执行一次真实推理请求。'}
-                        </p>
+            {result.supportedFormats.length > 0 ? (
+              <div className={`format-section-list ${result.supportedFormats.length > 1 ? 'format-section-list-two-column' : ''}`}>
+                {result.supportedFormats.map((format) => (
+                  <section key={format} className="format-section">
+                    <div className="format-section-head">
+                      <div>
+                        <p className="panel-kicker">{getFormatLabel(format)} 协议</p>
+                        <h3>{result.formatResults[format].models.length} 个模型</h3>
                       </div>
-
-                      <div className="model-check-actions">
-                        {check && check.state !== 'idle' && (
-                          <span className={`badge ${check.state === 'success' ? 'badge-success' : check.state === 'failed' ? 'badge-danger' : ''}`}>
-                            {check.state === 'testing' ? (
-                              <Loader2 size={14} className="spin" />
-                            ) : check.state === 'success' ? (
-                              <CheckCircle2 size={14} />
-                            ) : (
-                              <AlertTriangle size={14} />
-                            )}
-                            {check.state === 'success' ? '模型可用' : check.state === 'failed' ? '模型不可用' : '测试中'}
-                          </span>
-                        )}
-
+                      <div className="format-section-toolbar">
                         <button
                           type="button"
-                          className="secondary-button"
-                          onClick={() => void handleModelTest(model)}
-                          disabled={!canRunModelChecks || result.format === 'unknown'}
+                          className="secondary-button models-batch-button"
+                          onClick={() => void handleTestAllModels(format)}
+                          disabled={!canRunModelChecks}
                         >
-                          {isTesting ? (
+                          {isBatchTestingModels ? (
                             <>
                               <Loader2 size={16} className="spin" />
-                              测试中
+                              正在逐个测试
                             </>
                           ) : (
                             <>
                               <Send size={16} />
-                              测试模型
+                              测试全部
                             </>
                           )}
                         </button>
+                        <button
+                          type="button"
+                          className="secondary-button models-batch-button"
+                          onClick={() => handleImportToCcSwitch(format)}
+                          disabled={!apiKey.trim()}
+                        >
+                          <SquareArrowOutUpRight size={16} />
+                          导入 CC Switch
+                        </button>
                       </div>
                     </div>
-                  );
-                })}
+
+                    <div className="model-check-list">
+                      {result.formatResults[format].models.map((model) => {
+                        const modelCheckKey = buildModelCheckKey(format, model);
+                        const check = result.modelChecks[modelCheckKey];
+                        const isTesting = activeModelTest === modelCheckKey || check?.state === 'testing';
+
+                        return (
+                          <div key={modelCheckKey} className="model-check-item">
+                            <div className="model-check-copy">
+                              <strong>{model}</strong>
+                              <p>
+                                {check?.detail ?? `尚未验证该模型是否能通过 ${getFormatLabel(format)} 协议成功执行一次真实推理请求。`}
+                              </p>
+                            </div>
+
+                            <div className="model-check-actions">
+                              {check && check.state !== 'idle' && (
+                                <span className={`badge ${check.state === 'success' ? 'badge-success' : check.state === 'failed' ? 'badge-danger' : ''}`}>
+                                  {check.state === 'testing' ? (
+                                    <Loader2 size={14} className="spin" />
+                                  ) : check.state === 'success' ? (
+                                    <CheckCircle2 size={14} />
+                                  ) : (
+                                    <AlertTriangle size={14} />
+                                  )}
+                                  {check.state === 'success' ? '模型可用' : check.state === 'failed' ? '模型不可用' : '测试中'}
+                                </span>
+                              )}
+
+                              <button
+                                type="button"
+                                className="secondary-button"
+                                onClick={() => void handleModelTest(format, model)}
+                                disabled={!canRunModelChecks}
+                              >
+                                {isTesting ? (
+                                  <>
+                                    <Loader2 size={16} className="spin" />
+                                    测试中
+                                  </>
+                                ) : (
+                                  <>
+                                    <Send size={16} />
+                                    测试模型
+                                  </>
+                                )}
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </section>
+                ))}
               </div>
             ) : (
               <p className="empty-state">未能从响应负载中提取到模型标识。</p>
