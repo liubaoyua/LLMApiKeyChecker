@@ -1,6 +1,8 @@
 services:
   llm-api-checker:
-    image: ghcr.io/liubaoyua/llm-api-key-checker:latest
+    image: llm-api-checker:dev
+    build:
+      context: .
     ports:
       - "3000:3000"
     environment:

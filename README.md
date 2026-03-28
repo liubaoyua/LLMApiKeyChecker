@@ -84,10 +84,21 @@ http://localhost:3000/healthz
 
 ## Docker Compose 部署
 
-直接启动：
+### 生产环境
+
+默认的 `docker-compose.yml` 会直接从 `GHCR` 拉取镜像，不再本地构建。
+
+启动服务：
 
 ```bash
-docker compose up -d --build
+docker compose up -d
+```
+
+如果想先手动拉取最新镜像：
+
+```bash
+docker compose pull
+docker compose up -d
 ```
 
 查看日志：
@@ -100,6 +111,28 @@ docker compose logs -f
 
 ```bash
 docker compose down
+```
+
+### 开发或本地构建验证
+
+`docker-compose.dev.yml` 会基于当前目录里的代码和 `Dockerfile` 本地构建镜像。
+
+启动服务：
+
+```bash
+docker compose -f docker-compose.dev.yml up -d --build
+```
+
+查看日志：
+
+```bash
+docker compose -f docker-compose.dev.yml logs -f
+```
+
+停止服务：
+
+```bash
+docker compose -f docker-compose.dev.yml down
 ```
 
 ## GHCR 镜像发布
@@ -120,6 +153,8 @@ ghcr.io/<github-owner>/<github-repo>:latest
 ```text
 ghcr.io/liubaoyua/llm-api-key-checker:latest
 ```
+
+生产环境的 `docker-compose.yml` 默认就是使用这个镜像。
 
 首次使用前，你需要先把本项目推送到 GitHub，并确保 Actions 与 Packages 权限可用。
 
