@@ -57,9 +57,9 @@ export function BraveChecker() {
           limit: response.headers['x-ratelimit-limit'] || response.headers['x-ratelimit-request-limit'] || 'Unknown',
           remaining: response.headers['x-ratelimit-remaining'] || response.headers['x-ratelimit-request-remaining'] || 'Unknown',
         };
-      } catch (error: any) {
+      } catch (error: unknown) {
         let errorMsg = 'Failed';
-        if (error.response) {
+        if (axios.isAxiosError(error) && error.response) {
           if (error.response.status === 401 || error.response.status === 403) {
             errorMsg = 'Invalid Key';
           } else if (error.response.status === 429) {

@@ -4,24 +4,35 @@ import {
   AlertTriangle,
   CheckCircle2,
   Globe,
+  History,
   KeyRound,
   Loader2,
   LockKeyhole,
-  Network,
   Radar,
+  RefreshCcw,
+  Send,
+  Server,
   ShieldCheck,
   Sparkles,
-  Server,
   Search,
 } from 'lucide-react';
 import { BraveChecker } from './BraveChecker';
 
 type ApiFormat = 'openai' | 'claude' | 'unknown' | null;
+type StatusState = 'idle' | 'running' | 'success' | 'failed';
+type ModelCheckState = 'idle' | 'testing' | 'success' | 'failed';
 
 type ProbeStatus = {
   label: string;
-  state: 'idle' | 'running' | 'success' | 'failed';
+  state: StatusState;
   detail: string;
+};
+
+type ModelCheckResult = {
+  model: string;
+  state: ModelCheckState;
+  detail: string;
+  checkedAt?: string;
 };
 
 type TestResult = {
@@ -30,10 +41,30 @@ type TestResult = {
   error?: string;
   endpoint: string;
   statuses: ProbeStatus[];
+  modelChecks: Record<string, ModelCheckResult>;
+};
+
+type HistoryEntry = {
+  id: string;
+  baseUrl: string;
+  apiKey: string;
+  format: Exclude<ApiFormat, null>;
+  endpoint: string;
+  modelCount: number;
+  createdAt: string;
+};
+
+type ProbeOutcome = {
+  format: Exclude<ApiFormat, null>;
+  models: string[];
+  statuses: ProbeStatus[];
+  endpoint: string;
 };
 
 const STORAGE_KEY = 'llm-api-checker.form';
+const HISTORY_STORAGE_KEY = 'llm-api-checker.history';
 const DEFAULT_BASE_URL = 'https://api.openai.com';
+const HISTORY_LIMIT = 8;
 
 function normalizeBaseUrl(value: string) {
   return value.trim().replace(/\/+$/, '');
@@ -41,6 +72,14 @@ function normalizeBaseUrl(value: string) {
 
 function buildModelsUrl(baseUrl: string) {
   return baseUrl.endsWith('/v1') ? `${baseUrl}/models` : `${baseUrl}/v1/models`;
+}
+
+function buildOpenAiTestUrl(baseUrl: string) {
+  return baseUrl.endsWith('/v1') ? `${baseUrl}/chat/completions` : `${baseUrl}/v1/chat/completions`;
+}
+
+function buildClaudeTestUrl(baseUrl: string) {
+  return baseUrl.endsWith('/v1') ? `${baseUrl}/messages` : `${baseUrl}/v1/messages`;
 }
 
 function parseModelIds(data: unknown) {
@@ -92,12 +131,12 @@ function formatAxiosError(error: unknown) {
   return 'Unexpected request failure.';
 }
 
-async function probeModels(
-  targetUrl: string,
-  headers: Record<string, string>,
-) {
-  const proxyUrl = import.meta.env.VITE_PROXY_URL || '/__proxy';
-  const response = await axios.get(proxyUrl, {
+function getProxyUrl() {
+  return import.meta.env.VITE_PROXY_URL || '/__proxy';
+}
+
+async function proxyGet(targetUrl: string, headers: Record<string, string>) {
+  const response = await axios.get(getProxyUrl(), {
     params: { url: targetUrl },
     headers,
     timeout: 15000,
@@ -106,29 +145,235 @@ async function probeModels(
   return response.data;
 }
 
+async function proxyPost(targetUrl: string, headers: Record<string, string>, data: unknown) {
+  const response = await axios.post(getProxyUrl(), data, {
+    params: { url: targetUrl },
+    headers: {
+      'content-type': 'application/json',
+      ...headers,
+    },
+    timeout: 20000,
+  });
+
+  return response.data;
+}
+
+function createInitialStatuses(): ProbeStatus[] {
+  return [
+    {
+      label: '通过后端代理转发请求',
+      state: 'running',
+      detail: '通过同源后端服务转发请求以解决浏览器侧 CORS 跨域限制。',
+    },
+    {
+      label: '探测 OpenAI 兼容的模型端点',
+      state: 'idle',
+      detail: '验证 Authorization Bearer 流程与 `/v1/models` 的响应结构。',
+    },
+    {
+      label: '探测 Claude 兼容的模型端点',
+      state: 'idle',
+      detail: '使用 `x-api-key` + `anthropic-version` 请求头检测同一端点。',
+    },
+  ];
+}
+
+async function detectModels(
+  cleanBaseUrl: string,
+  apiKey: string,
+  onProgress: (result: TestResult) => void,
+): Promise<ProbeOutcome> {
+  const endpoint = buildModelsUrl(cleanBaseUrl);
+  const initialStatuses = createInitialStatuses();
+  const trimmedKey = apiKey.trim();
+
+  const openAiStatuses = [...initialStatuses];
+  openAiStatuses[0] = { ...openAiStatuses[0], state: 'success' };
+  openAiStatuses[1] = { ...openAiStatuses[1], state: 'running' };
+
+  onProgress({
+    format: null,
+    models: [],
+    endpoint,
+    statuses: openAiStatuses,
+    modelChecks: {},
+  });
+
+  try {
+    const openAiData = await proxyGet(endpoint, {
+      Authorization: `Bearer ${trimmedKey}`,
+    });
+    const openAiModels = parseModelIds(openAiData);
+
+    if (openAiModels.length > 0) {
+      return {
+        format: 'openai',
+        models: openAiModels,
+        endpoint,
+        statuses: [
+          { ...openAiStatuses[0], state: 'success' },
+          {
+            ...openAiStatuses[1],
+            state: 'success',
+            detail: `从 OpenAI 兼容响应中检测到 ${openAiModels.length} 个模型。`,
+          },
+          {
+            ...openAiStatuses[2],
+            state: 'idle',
+            detail: '已跳过，因为 OpenAI 兼容探测已成功。',
+          },
+        ],
+      };
+    }
+
+    throw new Error('已收到响应，但未找到模型标识。');
+  } catch (openAiError) {
+    const openAiMessage = formatAxiosError(openAiError);
+    const claudeStatuses = [
+      { ...openAiStatuses[0], state: 'success' as const },
+      {
+        ...openAiStatuses[1],
+        state: 'failed' as const,
+        detail: openAiMessage,
+      },
+      { ...openAiStatuses[2], state: 'running' as const },
+    ];
+
+    onProgress({
+      format: null,
+      models: [],
+      endpoint,
+      statuses: claudeStatuses,
+      modelChecks: {},
+    });
+
+    try {
+      const claudeData = await proxyGet(endpoint, {
+        'x-api-key': trimmedKey,
+        'anthropic-version': '2023-06-01',
+      });
+      const claudeModels = parseModelIds(claudeData);
+
+      if (claudeModels.length > 0) {
+        return {
+          format: 'claude',
+          models: claudeModels,
+          endpoint,
+          statuses: [
+            claudeStatuses[0],
+            claudeStatuses[1],
+            {
+              ...claudeStatuses[2],
+              state: 'success',
+              detail: `从 Claude 兼容响应中检测到 ${claudeModels.length} 个模型。`,
+            },
+          ],
+        };
+      }
+
+      throw new Error('已收到响应，但未找到 Claude 兼容的模型标识。');
+    } catch (claudeError) {
+      const claudeMessage = formatAxiosError(claudeError);
+
+      throw new Error(
+        `端点有响应，但未匹配到 OpenAI 或 Claude 的模型发现。OpenAI 探测：${openAiMessage} Claude 探测：${claudeMessage}`,
+      );
+    }
+  }
+}
+
+async function probeModelAvailability(
+  cleanBaseUrl: string,
+  apiKey: string,
+  format: Exclude<ApiFormat, 'unknown' | null>,
+  model: string,
+) {
+  const trimmedKey = apiKey.trim();
+
+  if (format === 'openai') {
+    await proxyPost(
+      buildOpenAiTestUrl(cleanBaseUrl),
+      { Authorization: `Bearer ${trimmedKey}` },
+      {
+        model,
+        messages: [{ role: 'user', content: 'ping' }],
+        max_tokens: 1,
+      },
+    );
+
+    return '模型已成功返回响应。';
+  }
+
+  await proxyPost(
+    buildClaudeTestUrl(cleanBaseUrl),
+    {
+      'x-api-key': trimmedKey,
+      'anthropic-version': '2023-06-01',
+    },
+    {
+      model,
+      max_tokens: 1,
+      messages: [{ role: 'user', content: 'ping' }],
+    },
+  );
+
+  return '模型已成功返回响应。';
+}
+
+function maskApiKey(value: string) {
+  const trimmed = value.trim();
+  if (trimmed.length <= 10) {
+    return trimmed;
+  }
+
+  return `${trimmed.slice(0, 4)}...${trimmed.slice(-4)}`;
+}
+
+function saveHistoryEntry(entry: HistoryEntry) {
+  const raw = window.localStorage.getItem(HISTORY_STORAGE_KEY);
+  const existing = raw ? (JSON.parse(raw) as HistoryEntry[]) : [];
+  const deduped = existing.filter(
+    (item) => !(item.baseUrl === entry.baseUrl && item.apiKey === entry.apiKey),
+  );
+  const next = [entry, ...deduped].slice(0, HISTORY_LIMIT);
+  window.localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(next));
+  return next;
+}
+
 function LLMChecker() {
   const [baseUrl, setBaseUrl] = useState(DEFAULT_BASE_URL);
   const [apiKey, setApiKey] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [result, setResult] = useState<TestResult | null>(null);
+  const [historyEntries, setHistoryEntries] = useState<HistoryEntry[]>([]);
+  const [activeHistoryId, setActiveHistoryId] = useState<string | null>(null);
+  const [activeModelTest, setActiveModelTest] = useState<string | null>(null);
+  const [isBatchTestingModels, setIsBatchTestingModels] = useState(false);
 
   useEffect(() => {
     const raw = window.localStorage.getItem(STORAGE_KEY);
 
-    if (!raw) {
-      return;
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw) as { baseUrl?: string; apiKey?: string };
+        if (parsed.baseUrl) {
+          setBaseUrl(parsed.baseUrl);
+        }
+        if (parsed.apiKey) {
+          setApiKey(parsed.apiKey);
+        }
+      } catch {
+        window.localStorage.removeItem(STORAGE_KEY);
+      }
     }
 
-    try {
-      const parsed = JSON.parse(raw) as { baseUrl?: string; apiKey?: string };
-      if (parsed.baseUrl) {
-        setBaseUrl(parsed.baseUrl);
+    const historyRaw = window.localStorage.getItem(HISTORY_STORAGE_KEY);
+    if (historyRaw) {
+      try {
+        setHistoryEntries(JSON.parse(historyRaw) as HistoryEntry[]);
+      } catch {
+        window.localStorage.removeItem(HISTORY_STORAGE_KEY);
       }
-      if (parsed.apiKey) {
-        setApiKey(parsed.apiKey);
-      }
-    } catch {
-      window.localStorage.removeItem(STORAGE_KEY);
     }
   }, []);
 
@@ -145,13 +390,24 @@ function LLMChecker() {
   const cleanBaseUrl = normalizeBaseUrl(baseUrl);
   const modelsEndpoint = cleanBaseUrl ? buildModelsUrl(cleanBaseUrl) : '';
   const canSubmit = Boolean(cleanBaseUrl && apiKey.trim() && !isLoading);
+  const canRunModelChecks =
+    !isLoading &&
+    !isBatchTestingModels &&
+    activeModelTest === null &&
+    result !== null &&
+    (result.format === 'openai' || result.format === 'claude');
 
-  const handleTest = async () => {
-    if (!canSubmit) {
+  const runTest = async (options?: { baseUrl?: string; apiKey?: string; historyId?: string | null }) => {
+    const nextBaseUrl = options?.baseUrl ?? baseUrl;
+    const nextApiKey = options?.apiKey ?? apiKey;
+    const normalizedBaseUrl = normalizeBaseUrl(nextBaseUrl);
+    const endpoint = normalizedBaseUrl ? buildModelsUrl(normalizedBaseUrl) : '';
+
+    if (!normalizedBaseUrl || !nextApiKey.trim()) {
       setResult({
         format: 'unknown',
         models: [],
-        endpoint: modelsEndpoint,
+        endpoint,
         error: '需要填写基础地址和 API 密钥。',
         statuses: [
           {
@@ -160,144 +416,47 @@ function LLMChecker() {
             detail: '测试前请同时填写基础地址与 API 密钥。',
           },
         ],
+        modelChecks: {},
       });
       return;
     }
 
+    setBaseUrl(nextBaseUrl);
+    setApiKey(nextApiKey);
     setIsLoading(true);
+    setActiveHistoryId(options?.historyId ?? null);
+    setActiveModelTest(null);
+    setIsBatchTestingModels(false);
     setResult(null);
 
-    const initialStatuses: ProbeStatus[] = [
-      {
-        label: '通过后端代理转发请求',
-        state: 'running',
-        detail: '通过同源后端服务转发请求以解决浏览器侧 CORS 跨域限制。',
-      },
-      {
-        label: '探测 OpenAI 兼容的模型端点',
-        state: 'idle',
-        detail: '验证 Authorization Bearer 流程与 `/v1/models` 的响应结构。',
-      },
-      {
-        label: '探测 Claude 兼容的模型端点',
-        state: 'idle',
-        detail: '使用 `x-api-key` + `anthropic-version` 请求头检测同一端点。',
-      },
-    ];
-
     try {
-      const openAiStatuses = [...initialStatuses];
-      openAiStatuses[0] = { ...openAiStatuses[0], state: 'success' };
-      openAiStatuses[1] = { ...openAiStatuses[1], state: 'running' };
-      setResult({
-        format: null,
-        models: [],
-        endpoint: modelsEndpoint,
-        statuses: openAiStatuses,
+      const outcome = await detectModels(normalizedBaseUrl, nextApiKey, setResult);
+      const finalResult: TestResult = {
+        format: outcome.format,
+        models: outcome.models,
+        endpoint: outcome.endpoint,
+        statuses: outcome.statuses,
+        modelChecks: {},
+      };
+
+      setResult(finalResult);
+
+      const nextHistory = saveHistoryEntry({
+        id: `${Date.now()}`,
+        baseUrl: normalizedBaseUrl,
+        apiKey: nextApiKey.trim(),
+        format: outcome.format,
+        endpoint: outcome.endpoint,
+        modelCount: outcome.models.length,
+        createdAt: new Date().toISOString(),
       });
-
-      try {
-        const openAiData = await probeModels(modelsEndpoint, {
-          Authorization: `Bearer ${apiKey.trim()}`,
-        });
-        const openAiModels = parseModelIds(openAiData);
-
-        if (openAiModels.length > 0) {
-          setResult({
-            format: 'openai',
-            models: openAiModels,
-            endpoint: modelsEndpoint,
-            statuses: [
-              { ...openAiStatuses[0], state: 'success' },
-              {
-                ...openAiStatuses[1],
-                state: 'success',
-                detail: `从 OpenAI 兼容响应中检测到 ${openAiModels.length} 个模型。`,
-              },
-              {
-                ...openAiStatuses[2],
-                state: 'idle',
-                detail: '已跳过，因为 OpenAI 兼容探测已成功。',
-              },
-            ],
-          });
-          return;
-        }
-
-        throw new Error('已收到响应，但未找到模型标识。');
-      } catch (openAiError) {
-        const openAiMessage = formatAxiosError(openAiError);
-        const claudeStatuses = [
-          { ...openAiStatuses[0], state: 'success' as const },
-          {
-            ...openAiStatuses[1],
-            state: 'failed' as const,
-            detail: openAiMessage,
-          },
-          { ...openAiStatuses[2], state: 'running' as const },
-        ];
-
-        setResult({
-          format: null,
-          models: [],
-          endpoint: modelsEndpoint,
-          statuses: claudeStatuses,
-        });
-
-        try {
-          const claudeData = await probeModels(modelsEndpoint, {
-            'x-api-key': apiKey.trim(),
-            'anthropic-version': '2023-06-01',
-          });
-          const claudeModels = parseModelIds(claudeData);
-
-          if (claudeModels.length > 0) {
-            setResult({
-              format: 'claude',
-              models: claudeModels,
-              endpoint: modelsEndpoint,
-              statuses: [
-                claudeStatuses[0],
-                claudeStatuses[1],
-                {
-                  ...claudeStatuses[2],
-                  state: 'success',
-                  detail: `从 Claude 兼容响应中检测到 ${claudeModels.length} 个模型。`,
-                },
-              ],
-            });
-            return;
-          }
-
-          throw new Error('已收到响应，但未找到 Claude 兼容的模型标识。');
-        } catch (claudeError) {
-          const claudeMessage = formatAxiosError(claudeError);
-
-          setResult({
-            format: 'unknown',
-            models: [],
-            endpoint: modelsEndpoint,
-            error:
-              `端点有响应，但未匹配到 OpenAI 或 Claude 的模型发现。` +
-              `OpenAI 探测：${openAiMessage} Claude 探测：${claudeMessage}`,
-            statuses: [
-              claudeStatuses[0],
-              claudeStatuses[1],
-              {
-                ...claudeStatuses[2],
-                state: 'failed',
-                detail: claudeMessage,
-              },
-            ],
-          });
-        }
-      }
-    } catch (unexpectedError) {
+      setHistoryEntries(nextHistory);
+    } catch (error) {
       setResult({
         format: 'unknown',
         models: [],
-        endpoint: modelsEndpoint,
-        error: formatAxiosError(unexpectedError),
+        endpoint,
+        error: formatAxiosError(error),
         statuses: [
           {
             label: '执行失败',
@@ -305,9 +464,156 @@ function LLMChecker() {
             detail: '测试流程在模型检测完成之前已中断。',
           },
         ],
+        modelChecks: {},
       });
     } finally {
       setIsLoading(false);
+      setActiveHistoryId(null);
+    }
+  };
+
+  const handleModelTest = async (model: string) => {
+    if (!result || result.format !== 'openai' && result.format !== 'claude') {
+      return;
+    }
+
+    setActiveModelTest(model);
+    setResult((current) => {
+      if (!current) {
+        return current;
+      }
+
+      return {
+        ...current,
+        modelChecks: {
+          ...current.modelChecks,
+          [model]: {
+            model,
+            state: 'testing',
+            detail: '正在调用真实推理接口验证模型可用性。',
+          },
+        },
+      };
+    });
+
+    try {
+      const detail = await probeModelAvailability(cleanBaseUrl, apiKey, result.format, model);
+
+      setResult((current) => {
+        if (!current) {
+          return current;
+        }
+
+        return {
+          ...current,
+          modelChecks: {
+            ...current.modelChecks,
+            [model]: {
+              model,
+              state: 'success',
+              detail,
+              checkedAt: new Date().toISOString(),
+            },
+          },
+        };
+      });
+    } catch (error) {
+      setResult((current) => {
+        if (!current) {
+          return current;
+        }
+
+        return {
+          ...current,
+          modelChecks: {
+            ...current.modelChecks,
+            [model]: {
+              model,
+              state: 'failed',
+              detail: formatAxiosError(error),
+              checkedAt: new Date().toISOString(),
+            },
+          },
+        };
+      });
+    } finally {
+      setActiveModelTest(null);
+    }
+  };
+
+  const handleTestAllModels = async () => {
+    if (!result || (result.format !== 'openai' && result.format !== 'claude') || result.models.length === 0) {
+      return;
+    }
+
+    setIsBatchTestingModels(true);
+
+    try {
+      for (const model of result.models) {
+        setActiveModelTest(model);
+        setResult((current) => {
+          if (!current) {
+            return current;
+          }
+
+          return {
+            ...current,
+            modelChecks: {
+              ...current.modelChecks,
+              [model]: {
+                model,
+                state: 'testing',
+                detail: '正在调用真实推理接口验证模型可用性。',
+              },
+            },
+          };
+        });
+
+        try {
+          const detail = await probeModelAvailability(cleanBaseUrl, apiKey, result.format, model);
+
+          setResult((current) => {
+            if (!current) {
+              return current;
+            }
+
+            return {
+              ...current,
+              modelChecks: {
+                ...current.modelChecks,
+                [model]: {
+                  model,
+                  state: 'success',
+                  detail,
+                  checkedAt: new Date().toISOString(),
+                },
+              },
+            };
+          });
+        } catch (error) {
+          setResult((current) => {
+            if (!current) {
+              return current;
+            }
+
+            return {
+              ...current,
+              modelChecks: {
+                ...current.modelChecks,
+                [model]: {
+                  model,
+                  state: 'failed',
+                  detail: formatAxiosError(error),
+                  checkedAt: new Date().toISOString(),
+                },
+              },
+            };
+          });
+        }
+      }
+    } finally {
+      setActiveModelTest(null);
+      setIsBatchTestingModels(false);
     }
   };
 
@@ -328,7 +634,7 @@ function LLMChecker() {
           </div>
           <h1>LLM API密钥检测器</h1>
           <p className="hero-lead">
-            验证基础地址，按常见的模型发现约定测试密钥，并通过配套后端代理解决浏览器跨域请求（CORS）问题。
+            验证基础地址与 API 密钥，先读取端点支持的模型列表，再按需对单个模型发起真实推理请求，确认它是否可用。
           </p>
 
           <div className="hero-metrics">
@@ -338,7 +644,7 @@ function LLMChecker() {
             </article>
             <article className="metric-card">
               <span>后端代理策略</span>
-              <strong>同源服务：`/__proxy`</strong>
+              <strong>默认同源代理：`/__proxy`</strong>
             </article>
           </div>
 
@@ -346,22 +652,22 @@ function LLMChecker() {
             <article className="guidance-card">
               <ShieldCheck size={18} />
               <div>
-                <h2>更安全的跨域处理</h2>
-                <p>通过部署配套的 Node.js 后端服务转发请求，避免了前端直接跨域调用导致的拦截与暴露。</p>
+                <h2>同源代理转发</h2>
+                <p>通过配套的 Node.js 后端服务转发请求，规避浏览器直接调用第三方接口时常见的 CORS 限制。</p>
               </div>
             </article>
             <article className="guidance-card">
               <Radar size={18} />
               <div>
-                <h2>双格式探测</h2>
-                <p>测试器会同时以 Bearer 令牌和 Claude 风格请求头探测 `/v1/models`。</p>
+                <h2>双阶段探测</h2>
+                <p>先读取 `/v1/models` 识别接口类型与模型列表，再由你选择单个模型或一键逐个发起真实推理请求。</p>
               </div>
             </article>
             <article className="guidance-card">
-              <Network size={18} />
+              <History size={18} />
               <div>
-                <h2>开箱即用的部署</h2>
-                <p>项目已包含完整的 Docker 配置，前端页面与代理服务可一键部署至生产环境。</p>
+                <h2>测试历史复用</h2>
+                <p>成功读取过模型列表的端点会写入当前浏览器本地历史记录，点击即可自动回填并重新探测。</p>
               </div>
             </article>
           </div>
@@ -410,10 +716,10 @@ function LLMChecker() {
                 onChange={(event) => setApiKey(event.target.value)}
               />
             </div>
-            <p className="field-note">密钥会在本地会话中保存，便于重复运行无需再次输入。</p>
+            <p className="field-note">密钥会保存在当前浏览器本地，用于重复测试与历史记录回填。</p>
           </div>
 
-          <button className="primary-button" onClick={handleTest} disabled={!canSubmit}>
+          <button className="primary-button" onClick={() => void runTest()} disabled={!canSubmit}>
             {isLoading ? (
               <>
                 <Loader2 size={18} className="spin" />
@@ -433,6 +739,43 @@ function LLMChecker() {
           </div>
         </section>
       </section>
+
+      {historyEntries.length > 0 && (
+        <section className="results-grid">
+          <article className="results-panel history-panel">
+            <div className="panel-header">
+              <div>
+                <p className="panel-kicker">测试历史</p>
+                <h2>最近 {historyEntries.length} 次成功测试</h2>
+              </div>
+            </div>
+
+            <div className="history-list">
+              {historyEntries.map((entry) => (
+                <button
+                  key={entry.id}
+                  type="button"
+                  className="history-item"
+                  onClick={() => void runTest({ baseUrl: entry.baseUrl, apiKey: entry.apiKey, historyId: entry.id })}
+                  disabled={isLoading}
+                >
+                  <div className="history-item-head">
+                    <strong>{entry.baseUrl}</strong>
+                    <span className="badge badge-success">
+                      <RefreshCcw size={14} />
+                      {activeHistoryId === entry.id ? '重新测试中' : '回填并测试'}
+                    </span>
+                  </div>
+                  <p>
+                    密钥 {maskApiKey(entry.apiKey)} · {entry.format === 'openai' ? 'OpenAI' : 'Claude'} · {entry.modelCount} 个模型
+                  </p>
+                  <code>{entry.endpoint}</code>
+                </button>
+              ))}
+            </div>
+          </article>
+        </section>
+      )}
 
       {result && (
         <section className="results-grid">
@@ -461,7 +804,7 @@ function LLMChecker() {
             ) : (
               <div className="message-box message-box-success">
                 <CheckCircle2 size={18} />
-                <p>端点返回了可识别的模型列表，请在下方查看已发现的模型。</p>
+                <p>端点返回了可识别的模型列表。你现在可以逐个点击模型，验证该模型是否真正可用于推理请求。</p>
               </div>
             )}
           </article>
@@ -500,18 +843,82 @@ function LLMChecker() {
           <article className="results-panel models-panel">
             <div className="panel-header">
               <div>
-                <p className="panel-kicker">已发现模型</p>
-                <h2>{result.models.length} 个可用</h2>
+                <p className="panel-kicker">模型可用性</p>
+                <h2>{result.models.length} 个已发现模型</h2>
               </div>
+              {result.models.length > 0 && (
+                <button
+                  type="button"
+                  className="secondary-button models-batch-button"
+                  onClick={() => void handleTestAllModels()}
+                  disabled={!canRunModelChecks}
+                >
+                  {isBatchTestingModels ? (
+                    <>
+                      <Loader2 size={16} className="spin" />
+                      正在逐个测试
+                    </>
+                  ) : (
+                    <>
+                      <Send size={16} />
+                      一键测试全部
+                    </>
+                  )}
+                </button>
+              )}
             </div>
 
             {result.models.length > 0 ? (
-              <div className="model-grid">
-                {result.models.map((model) => (
-                  <span key={model} className="model-chip">
-                    {model}
-                  </span>
-                ))}
+              <div className="model-check-list">
+                {result.models.map((model) => {
+                  const check = result.modelChecks[model];
+                  const isTesting = activeModelTest === model || check?.state === 'testing';
+
+                  return (
+                    <div key={model} className="model-check-item">
+                      <div className="model-check-copy">
+                        <strong>{model}</strong>
+                        <p>
+                          {check?.detail ?? '尚未验证该模型是否能成功执行一次真实推理请求。'}
+                        </p>
+                      </div>
+
+                      <div className="model-check-actions">
+                        {check && check.state !== 'idle' && (
+                          <span className={`badge ${check.state === 'success' ? 'badge-success' : check.state === 'failed' ? 'badge-danger' : ''}`}>
+                            {check.state === 'testing' ? (
+                              <Loader2 size={14} className="spin" />
+                            ) : check.state === 'success' ? (
+                              <CheckCircle2 size={14} />
+                            ) : (
+                              <AlertTriangle size={14} />
+                            )}
+                            {check.state === 'success' ? '模型可用' : check.state === 'failed' ? '模型不可用' : '测试中'}
+                          </span>
+                        )}
+
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          onClick={() => void handleModelTest(model)}
+                          disabled={!canRunModelChecks || result.format === 'unknown'}
+                        >
+                          {isTesting ? (
+                            <>
+                              <Loader2 size={16} className="spin" />
+                              测试中
+                            </>
+                          ) : (
+                            <>
+                              <Send size={16} />
+                              测试模型
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             ) : (
               <p className="empty-state">未能从响应负载中提取到模型标识。</p>
@@ -530,9 +937,9 @@ function App() {
     <main className="app-shell">
       <div className="page-glow page-glow-left" />
       <div className="page-glow page-glow-right" />
-      
-      <div style={{ display: 'flex', gap: '16px', marginBottom: '24px', padding: '0 16px' }}>
-        <button 
+
+      <div style={{ display: 'flex', gap: '16px', marginBottom: '24px', padding: '0 16px', flexWrap: 'wrap' }}>
+        <button
           onClick={() => setActiveTab('llm')}
           style={{
             display: 'flex',
@@ -545,13 +952,13 @@ function App() {
             color: activeTab === 'llm' ? 'var(--text)' : 'var(--text-muted)',
             fontWeight: activeTab === 'llm' ? 600 : 500,
             cursor: 'pointer',
-            transition: 'all 0.2s ease'
+            transition: 'all 0.2s ease',
           }}
         >
           <Server size={18} />
           LLM 接口检测
         </button>
-        <button 
+        <button
           onClick={() => setActiveTab('brave')}
           style={{
             display: 'flex',
@@ -564,7 +971,7 @@ function App() {
             color: activeTab === 'brave' ? 'var(--text)' : 'var(--text-muted)',
             fontWeight: activeTab === 'brave' ? 600 : 500,
             cursor: 'pointer',
-            transition: 'all 0.2s ease'
+            transition: 'all 0.2s ease',
           }}
         >
           <Search size={18} />
