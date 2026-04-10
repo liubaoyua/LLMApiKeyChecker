@@ -87,6 +87,7 @@ http://localhost:3000/healthz
 ### 生产环境
 
 默认的 `docker-compose.yml` 会直接从 `GHCR` 拉取镜像，不再本地构建。
+同时已配置 `pull_policy: always`，执行 `docker compose up -d` 时会优先拉取最新的 `latest` 镜像，避免继续运行本地缓存的旧版本。
 
 启动服务：
 
