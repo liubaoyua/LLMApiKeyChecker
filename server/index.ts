@@ -1,6 +1,8 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import http from 'node:http';
+import https from 'node:https';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -33,6 +35,108 @@ function appendForwardHeader(
   }
 }
 
+type UpstreamRequestOptions = {
+  method: string;
+  headers: Record<string, string>;
+  body?: Buffer;
+};
+
+type UpstreamResponseData = {
+  status: number;
+  headers: Headers;
+  body: Buffer;
+};
+
+async function fetchUpstream(url: URL, options: UpstreamRequestOptions): Promise<UpstreamResponseData> {
+  const response = await fetch(url.toString(), {
+    method: options.method,
+    headers: options.headers,
+    body: options.body as BodyInit | undefined,
+  });
+
+  return {
+    status: response.status,
+    headers: response.headers,
+    body: Buffer.from(await response.arrayBuffer()),
+  };
+}
+
+function requestUpstreamIgnoringTls(url: URL, options: UpstreamRequestOptions): Promise<UpstreamResponseData> {
+  const transport = url.protocol === 'https:' ? https : http;
+
+  return new Promise((resolve, reject) => {
+    const request = transport.request(
+      url,
+      {
+        method: options.method,
+        headers: options.headers,
+        rejectUnauthorized: false,
+      },
+      (response) => {
+        const chunks: Buffer[] = [];
+
+        response.on('data', (chunk) => {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        });
+
+        response.on('end', () => {
+          const headers = new Headers();
+
+          Object.entries(response.headers).forEach(([key, value]) => {
+            if (Array.isArray(value)) {
+              value.forEach((item) => headers.append(key, item));
+              return;
+            }
+
+            if (typeof value === 'string') {
+              headers.set(key, value);
+            }
+          });
+
+          resolve({
+            status: response.statusCode ?? 502,
+            headers,
+            body: Buffer.concat(chunks),
+          });
+        });
+      },
+    );
+
+    request.on('error', reject);
+
+    if (options.body && options.body.length > 0) {
+      request.write(options.body);
+    }
+
+    request.end();
+  });
+}
+
+function isTlsHandshakeError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const candidates = [error, 'cause' in error ? error.cause : undefined];
+  const retriableCodes = new Set([
+    'ECONNRESET',
+    'DEPTH_ZERO_SELF_SIGNED_CERT',
+    'SELF_SIGNED_CERT_IN_CHAIN',
+    'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+    'CERT_HAS_EXPIRED',
+    'ERR_TLS_CERT_ALTNAME_INVALID',
+  ]);
+
+  return candidates.some((candidate) => {
+    if (!(candidate instanceof Error)) {
+      return false;
+    }
+
+    const code = 'code' in candidate ? candidate.code : undefined;
+    return typeof code === 'string' && retriableCodes.has(code);
+  });
+}
+
 app.get('/healthz', (_req, res) => {
   res.json({
     status: 'ok',
@@ -63,6 +167,7 @@ app.all('/__proxy', async (req, res) => {
 
   try {
     const headers: Record<string, string> = {};
+    let requestBody: Buffer | undefined;
 
     appendForwardHeader(headers, 'authorization', req.headers.authorization);
     appendForwardHeader(headers, 'content-type', req.headers['content-type']);
@@ -70,18 +175,32 @@ app.all('/__proxy', async (req, res) => {
     appendForwardHeader(headers, 'anthropic-version', req.headers['anthropic-version']);
     appendForwardHeader(headers, 'x-subscription-token', req.headers['x-subscription-token']);
 
-    const fetchOptions: RequestInit = {
-      method: req.method,
-      headers,
-    };
-
     // Forward body if not GET/HEAD
     if (!['GET', 'HEAD'].includes(req.method.toUpperCase()) && Buffer.isBuffer(req.body) && req.body.length > 0) {
-      fetchOptions.body = new Uint8Array(req.body);
+      requestBody = Buffer.from(req.body);
     }
 
-    const upstreamResponse = await fetch(upstreamUrl.toString(), fetchOptions);
-    
+    let upstreamResponse: UpstreamResponseData;
+
+    try {
+      upstreamResponse = await fetchUpstream(upstreamUrl, {
+        method: req.method,
+        headers,
+        body: requestBody,
+      });
+    } catch (error) {
+      if (upstreamUrl.protocol !== 'https:' || !isTlsHandshakeError(error)) {
+        throw error;
+      }
+
+      console.warn(`Proxy TLS retry without certificate verification for ${upstreamUrl.host}`);
+      upstreamResponse = await requestUpstreamIgnoringTls(upstreamUrl, {
+        method: req.method,
+        headers,
+        body: requestBody,
+      });
+    }
+
     res.status(upstreamResponse.status);
     res.setHeader('Access-Control-Expose-Headers', '*');
 
@@ -91,8 +210,7 @@ app.all('/__proxy', async (req, res) => {
       }
     });
 
-    const responseBody = Buffer.from(await upstreamResponse.arrayBuffer());
-    res.send(responseBody);
+    res.send(upstreamResponse.body);
   } catch (error) {
     console.error('Proxy Error:', error);
     res.status(502).json({
