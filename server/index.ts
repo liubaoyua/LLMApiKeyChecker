@@ -21,6 +21,18 @@ function getHeaderValue(value: string | string[] | undefined): string {
   return Array.isArray(value) ? value.join(',') : value ?? '';
 }
 
+function appendForwardHeader(
+  headers: Record<string, string>,
+  name: string,
+  value: string | string[] | undefined,
+) {
+  const normalizedValue = getHeaderValue(value).trim();
+
+  if (normalizedValue) {
+    headers[name] = normalizedValue;
+  }
+}
+
 app.get('/healthz', (_req, res) => {
   res.json({
     status: 'ok',
@@ -51,13 +63,12 @@ app.all('/__proxy', async (req, res) => {
 
   try {
     const headers: Record<string, string> = {};
-    
-    // Forward relevant headers
-    if (req.headers.authorization) headers['authorization'] = getHeaderValue(req.headers.authorization);
-    if (req.headers['content-type']) headers['content-type'] = getHeaderValue(req.headers['content-type']);
-    if (req.headers['x-api-key']) headers['x-api-key'] = getHeaderValue(req.headers['x-api-key']);
-    if (req.headers['anthropic-version']) headers['anthropic-version'] = getHeaderValue(req.headers['anthropic-version']);
-    if (req.headers['x-subscription-token']) headers['x-subscription-token'] = getHeaderValue(req.headers['x-subscription-token']);
+
+    appendForwardHeader(headers, 'authorization', req.headers.authorization);
+    appendForwardHeader(headers, 'content-type', req.headers['content-type']);
+    appendForwardHeader(headers, 'x-api-key', req.headers['x-api-key']);
+    appendForwardHeader(headers, 'anthropic-version', req.headers['anthropic-version']);
+    appendForwardHeader(headers, 'x-subscription-token', req.headers['x-subscription-token']);
 
     const fetchOptions: RequestInit = {
       method: req.method,

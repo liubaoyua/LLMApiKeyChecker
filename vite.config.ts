@@ -7,6 +7,18 @@ function getHeaderValue(value: string | string[] | undefined) {
   return Array.isArray(value) ? value.join(',') : value ?? '';
 }
 
+function appendForwardHeader(
+  headers: Record<string, string>,
+  name: string,
+  value: string | string[] | undefined,
+) {
+  const normalizedValue = getHeaderValue(value).trim();
+
+  if (normalizedValue) {
+    headers[name] = normalizedValue;
+  }
+}
+
 export default defineConfig({
   plugins: [
     react(),
@@ -16,7 +28,10 @@ export default defineConfig({
         server.middlewares.use(proxyRoute, async (req, res) => {
           res.setHeader('Access-Control-Allow-Origin', '*');
           res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-          res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-api-key, anthropic-version');
+          res.setHeader(
+            'Access-Control-Allow-Headers',
+            'Content-Type, Authorization, x-api-key, anthropic-version, x-subscription-token',
+          );
 
           if (req.method === 'OPTIONS') {
             res.statusCode = 204;
@@ -54,6 +69,13 @@ export default defineConfig({
 
           try {
             const bodyChunks: Uint8Array[] = [];
+            const headers: Record<string, string> = {};
+
+            appendForwardHeader(headers, 'authorization', req.headers.authorization);
+            appendForwardHeader(headers, 'content-type', req.headers['content-type']);
+            appendForwardHeader(headers, 'x-api-key', req.headers['x-api-key']);
+            appendForwardHeader(headers, 'anthropic-version', req.headers['anthropic-version']);
+            appendForwardHeader(headers, 'x-subscription-token', req.headers['x-subscription-token']);
 
             for await (const chunk of req) {
               bodyChunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
@@ -61,12 +83,7 @@ export default defineConfig({
 
             const upstreamResponse = await fetch(upstreamUrl, {
               method: req.method,
-              headers: {
-                authorization: getHeaderValue(req.headers.authorization),
-                'content-type': getHeaderValue(req.headers['content-type']),
-                'x-api-key': getHeaderValue(req.headers['x-api-key']),
-                'anthropic-version': getHeaderValue(req.headers['anthropic-version']),
-              },
+              headers,
               body:
                 req.method && ['GET', 'HEAD'].includes(req.method.toUpperCase())
                   ? undefined
